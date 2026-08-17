@@ -22,10 +22,44 @@ kernel_version = tuple(map(int,os.uname().release.split('-')[0].split('.')))
 
 DEFAULT_ENCODING = "utf8"
 DEFAULT_CONFIG_DIR = "/etc/legion_linux"
-if kernel_version >= (7, 0, 0):
-    LEGION_SYS_BASEPATH = '/sys/module/legion_laptop/drivers/platform:legion/legion'
-else:
-    LEGION_SYS_BASEPATH = '/sys/module/legion_laptop/drivers/platform:legion/PNP0C09:00'
+def _discover_legion_sys_baspath():
+    # Keep the historically-correct fixed path as the primary choice so that
+    # every existing model keeps using the exact LEGION_SYS_BASEPATH it has
+    # always used. Only fall back to discovery when that path does not exist
+    # (e.g. 83SC, which binds under a different device name). Other models
+    # are therefore completely unaffected by this change.
+    if kernel_version >= (7, 0, 0):
+        fixed = '/sys/module/legion_laptop/drivers/platform:legion/legion'
+    else:
+        fixed = '/sys/module/legion_laptop/drivers/platform:legion/PNP0C09:00'
+    if os.path.isdir(fixed):
+        return fixed
+    # Fallback: device bound under a non-standard name (83SC).
+    # /sys/bus/platform/drivers/legion/ also contains driver-internal
+    # entries (bind, unbind, uevent, module, driver, power, ...) that are
+    # NOT the device. Skip those and only accept a directory that actually
+    # exposes legion attributes, so we never resolve to the `module`
+    # symlink or any other non-device entry.
+    _NON_DEVICE_ENTRIES = {
+        "bind", "unbind", "uevent", "module", "driver", "power",
+        "async", "modalias",
+    }
+    _DEVICE_MARKERS = (
+        "model",
+        "cpu_default_powerlimit",
+        "cpu_shortterm_powerlimit",
+        "gpu_oc",
+    )
+    for c in sorted(glob.glob('/sys/bus/platform/drivers/legion/*')):
+        name = os.path.basename(c.rstrip('/'))
+        if name in _NON_DEVICE_ENTRIES or not os.path.isdir(c):
+            continue
+        if any(os.path.exists(os.path.join(c, m)) for m in _DEVICE_MARKERS):
+            return c
+    return fixed
+
+
+LEGION_SYS_BASEPATH = _discover_legion_sys_baspath()
 IDEAPAD_SYS_BASEPATH = '/sys/bus/platform/drivers/ideapad_acpi/VPC2004:00'
 LBLDVC_FILE = "/sys/firmware/efi/efivars/LBLDVC-871455d1-5576-4fb8-9865-af0824463c9f"
 LBLDESP_FILE = "/sys/firmware/efi/efivars/LBLDESP-871455d0-5576-4fb8-9865-af0824463b9e"
@@ -635,6 +669,21 @@ class GPUTemperatureLimit(IntFileFeature):
         super().__init__(os.path.join(LEGION_SYS_BASEPATH, "gpu_temperature_limit"), 0, 120, 1)
 
 
+class CPUL1Tau(IntFileFeature):
+    def __init__(self):
+        super().__init__(os.path.join(LEGION_SYS_BASEPATH, "cpu_l1_tau"), 0, 200, 1)
+
+
+class CPUTemperatureLimit(IntFileFeature):
+    def __init__(self):
+        super().__init__(os.path.join(LEGION_SYS_BASEPATH, "cpu_temperature_limit"), 0, 120, 1)
+
+
+class GPUPowerTargetOffset(IntFileFeature):
+    def __init__(self):
+        super().__init__(os.path.join(LEGION_SYS_BASEPATH, "gpu_power_target_offset"), 10, 45, 5)
+
+
 class YLogoLight(BoolFileFeature):
     def __init__(self):
         super().__init__("/sys/class/leds/platform::ylogo/brightness")
@@ -912,7 +961,7 @@ class FanCurveIO(Feature):
 
     def get_fan_2_speed_rpm(self, point_id):
         pwm = self.get_fan_2_speed_pwm(point_id)
-        return round(((pwm * self.get_fan_2_max_rpm() + (100 * 225) - 1) // (100 * 255)) * 100, ndigits=2)
+        return round(((pwm * self.get_fan_2_max_rpm() + (100 * 255) - 1) // (100 * 255)) * 100, ndigits=2)
 
     def get_lower_cpu_temperature(self, point_id):
         point_id = self._validate_point_id(point_id)
@@ -1507,6 +1556,9 @@ class LegionModelFacade:
         self.gpu_ctgp_power_limit = GPUCTGPPowerLimit()
         self.gpu_ppab_power_limit = GPUPPABPowerLimit()
         self.gpu_temperature_limit = GPUTemperatureLimit()
+        self.cpu_l1_tau = CPUL1Tau()
+        self.cpu_temperature_limit = CPUTemperatureLimit()
+        self.gpu_power_target_offset = GPUPowerTargetOffset()
 
         # light
         self.ylogo_light = YLogoLight()
